@@ -50,6 +50,16 @@ app.post('/api/generate-video', upload.single('image'), (req, res) => {
     const { script, language, aspect_ratio, target_length_seconds } = req.body;
     const image = req.file;
 
+    const parsedLength = Number(target_length_seconds) || 10;
+
+    console.log(`[API REQUEST] /api/generate-video received:
+      - Script Length: ${script ? script.length : 0} characters
+      - Language: ${language}
+      - Aspect Ratio: ${aspect_ratio}
+      - Target Length: ${parsedLength} seconds
+      - Image Uploaded: ${image ? 'Yes (' + image.originalname + ')' : 'No'}
+    `);
+
     const jobId = uuidv4();
     const jobDir = path.join(TEMP_DIR, jobId);
     fs.mkdirSync(jobDir, { recursive: true });
@@ -76,7 +86,7 @@ app.post('/api/generate-video', upload.single('image'), (req, res) => {
       imagePath,
       language: language || 'en',
       aspect_ratio: aspect_ratio || '16:9',
-      target_length_seconds: parseFloat(target_length_seconds) || 10
+      target_length_seconds: parsedLength
     }).catch(err => {
       console.error(`Job ${jobId} failed:`, err);
       if (jobs[jobId]) {
