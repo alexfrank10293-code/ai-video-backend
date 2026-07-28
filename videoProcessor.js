@@ -22,20 +22,10 @@ export async function processVideoJob(jobId, payload) {
     job.status = 'Generating Kokoro Audio...';
     console.log(`[Job ${jobId}] ${job.status}`);
     
+    const hfToken = process.env.HF_TOKEN || undefined;
+
     try {
-      const audioApp = await client("hexgrad/Kokoro-TTS");
-      
-      // Attempt dynamic endpoint mapping or default to likely candidates
-      let endpoint = "/generate"; 
-      try {
-        const apiInfo = await audioApp.view_api();
-        const endpoints = Object.keys(apiInfo.named_endpoints || {});
-        if (endpoints.includes("/generate_audio")) endpoint = "/generate_audio";
-        else if (endpoints.includes("/predict")) endpoint = "/predict";
-        else if (endpoints.length > 0) endpoint = endpoints[0];
-      } catch (e) {
-        console.warn(`[Job ${jobId}] Could not dynamically view Kokoro API:`, e.message);
-      }
+      const audioApp = await client("hexgrad/Kokoro-TTS", { hf_token: hfToken });
       
       let voice = "af_heart"; // default english voice
       if (language === 'hi') voice = "hi_hindi";
@@ -45,13 +35,35 @@ export async function processVideoJob(jobId, payload) {
       if (language === 'es') voice = "es_spanish";
       if (language === 'fr') voice = "fr_french";
       
-      console.log(`[Job ${jobId}] Calling Kokoro TTS at endpoint ${endpoint} with voice ${voice}`);
+      let audioResult = null;
+      const endpointsToTry = ["/generate_audio", "/generate", "/predict", "/run"];
       
-      const audioResult = await audioApp.predict(endpoint, [
-        script,
-        voice,
-        1.0 // speed
-      ]);
+      for (const ep of endpointsToTry) {
+        try {
+          console.log(`[Job ${jobId}] Trying Kokoro TTS endpoint: ${ep}`);
+          audioResult = await audioApp.predict(ep, [script, voice, 1.0]);
+          if (audioResult) {
+            console.log(`[Job ${jobId}] Success with endpoint ${ep}`);
+            break;
+          }
+        } catch (e) {
+          // ignore and try next
+        }
+      }
+      
+      if (!audioResult) {
+        // Fallback to dynamically getting the first named endpoint
+        try {
+          const apiInfo = await audioApp.view_api();
+          const firstEndpoint = Object.keys(apiInfo.named_endpoints || {})[0];
+          if (firstEndpoint) {
+            console.log(`[Job ${jobId}] Trying fallback Kokoro endpoint: ${firstEndpoint}`);
+            audioResult = await audioApp.predict(firstEndpoint, [script, voice, 1.0]);
+          }
+        } catch(e) {}
+      }
+
+      if (!audioResult) throw new Error("All endpoints failed for Kokoro-TTS.");
       
       const audioUrl = audioResult.data[1]?.url || audioResult.data[0]?.url || (Array.isArray(audioResult.data) ? audioResult.data.find(d => d?.url)?.url : null);
       if (audioUrl) {
@@ -60,7 +72,7 @@ export async function processVideoJob(jobId, payload) {
         throw new Error(`No audio URL returned from Kokoro. Payload: ${JSON.stringify(audioResult.data)}`);
       }
     } catch (err) {
-      console.error(`[Job ${jobId}] Kokoro API failed. Details:`, err.message, err.data || '');
+      console.error(`[Job ${jobId}] Kokoro API failed. Details:`, err.message);
       // Fallback for development if space is paused/inaccessible
       await generateDummyAudio(audioPath, target_length_seconds || 10);
     }
@@ -70,49 +82,54 @@ export async function processVideoJob(jobId, payload) {
     console.log(`[Job ${jobId}] ${job.status}`);
     
     try {
+      const videoApp = await client("wavespeed/wan2.2", { hf_token: hfToken });
+      let videoResult = null;
+
       if (imagePath) {
         // Image to Video
-        const videoApp = await client("Wan-AI/Wan2.2-I2V-14B");
-        let endpoint = "/predict";
-        try {
-          const apiInfo = await videoApp.view_api();
-          const endpoints = Object.keys(apiInfo.named_endpoints || {});
-          if (endpoints.includes("/generate_video")) endpoint = "/generate_video";
-          else if (endpoints.includes("/i2v")) endpoint = "/i2v";
-        } catch (e) {}
-
-        console.log(`[Job ${jobId}] Calling Wan2.2-I2V at endpoint ${endpoint}`);
-        const videoResult = await videoApp.predict(endpoint, [
-          handle_file(imagePath), // image
-          script, // prompt
-          "5.0" // optional parameters for typical Gradio i2v space
-        ]);
-        const videoUrl = videoResult.data[0]?.url || (Array.isArray(videoResult.data) ? videoResult.data.find(d => d?.url)?.url : null);
-        if (videoUrl) await downloadFile(videoUrl, videoPath);
-        else throw new Error(`No video URL returned from Wan2.2-I2V. Payload: ${JSON.stringify(videoResult.data)}`);
+        const endpointsToTry = ["/generate_video", "/i2v", "/predict", "/run"];
+        for (const ep of endpointsToTry) {
+          try {
+             console.log(`[Job ${jobId}] Trying Wan2.2-I2V endpoint: ${ep}`);
+             videoResult = await videoApp.predict(ep, [handle_file(imagePath), script, "5.0"]);
+             if (videoResult) break;
+          } catch(e) {}
+        }
       } else {
         // Text to Video
-        const videoApp = await client("Wan-AI/Wan2.2-T2V-14B");
-        let endpoint = "/predict";
+        const endpointsToTry = ["/generate_video", "/t2v", "/predict", "/run"];
+        for (const ep of endpointsToTry) {
+          try {
+             console.log(`[Job ${jobId}] Trying Wan2.2-T2V endpoint: ${ep}`);
+             videoResult = await videoApp.predict(ep, [script, aspect_ratio, "5.0"]);
+             if (videoResult) break;
+          } catch(e) {}
+        }
+      }
+
+      if (!videoResult) {
+        // Fallback to dynamically getting the first named endpoint
         try {
           const apiInfo = await videoApp.view_api();
-          const endpoints = Object.keys(apiInfo.named_endpoints || {});
-          if (endpoints.includes("/generate_video")) endpoint = "/generate_video";
-          else if (endpoints.includes("/t2v")) endpoint = "/t2v";
-        } catch (e) {}
-
-        console.log(`[Job ${jobId}] Calling Wan2.2-T2V at endpoint ${endpoint}`);
-        const videoResult = await videoApp.predict(endpoint, [
-          script, // prompt
-          aspect_ratio, // aspect ratio
-          "5.0" // optional speed/duration
-        ]);
-        const videoUrl = videoResult.data[0]?.url || (Array.isArray(videoResult.data) ? videoResult.data.find(d => d?.url)?.url : null);
-        if (videoUrl) await downloadFile(videoUrl, videoPath);
-        else throw new Error(`No video URL returned from Wan2.2-T2V. Payload: ${JSON.stringify(videoResult.data)}`);
+          const firstEndpoint = Object.keys(apiInfo.named_endpoints || {})[0];
+          if (firstEndpoint) {
+            console.log(`[Job ${jobId}] Trying fallback Wan2.2 endpoint: ${firstEndpoint}`);
+            if (imagePath) {
+              videoResult = await videoApp.predict(firstEndpoint, [handle_file(imagePath), script, "5.0"]);
+            } else {
+              videoResult = await videoApp.predict(firstEndpoint, [script, aspect_ratio, "5.0"]);
+            }
+          }
+        } catch(e) {}
       }
+      
+      if (!videoResult) throw new Error("All endpoints failed for wavespeed/wan2.2.");
+
+      const videoUrl = videoResult.data[0]?.url || (Array.isArray(videoResult.data) ? videoResult.data.find(d => d?.url)?.url : null);
+      if (videoUrl) await downloadFile(videoUrl, videoPath);
+      else throw new Error(`No video URL returned from Wan2.2. Payload: ${JSON.stringify(videoResult.data)}`);
     } catch (err) {
-      console.error(`[Job ${jobId}] Wan2.2 API failed. Details:`, err.message, err.data || '');
+      console.error(`[Job ${jobId}] Wan2.2 API failed. Details:`, err.message);
       // Fallback for development if space is paused/inaccessible
       await generateDummyVideo(videoPath, aspect_ratio);
     }
