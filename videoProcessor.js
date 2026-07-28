@@ -22,29 +22,45 @@ export async function processVideoJob(jobId, payload) {
     job.status = 'Generating Kokoro Audio...';
     console.log(`[Job ${jobId}] ${job.status}`);
     
-    // The hexgrad/Kokoro-TTS space signature. Fallback to basic if specific endpoints fail.
     try {
       const audioApp = await client("hexgrad/Kokoro-TTS");
-      // Assuming a standard TTS interface: text, voice string (e.g. "af_heart"), speed.
-      // We will map language to a default voice if needed, e.g. "af_heart" for EN.
-      let voice = "af_heart"; // default english voice
-      if (language.toLowerCase().startsWith('es')) voice = "ef_dora"; // example for spanish
       
-      const audioResult = await audioApp.predict("/predict", [
+      // Attempt dynamic endpoint mapping or default to likely candidates
+      let endpoint = "/generate"; 
+      try {
+        const apiInfo = await audioApp.view_api();
+        const endpoints = Object.keys(apiInfo.named_endpoints || {});
+        if (endpoints.includes("/generate_audio")) endpoint = "/generate_audio";
+        else if (endpoints.includes("/predict")) endpoint = "/predict";
+        else if (endpoints.length > 0) endpoint = endpoints[0];
+      } catch (e) {
+        console.warn(`[Job ${jobId}] Could not dynamically view Kokoro API:`, e.message);
+      }
+      
+      let voice = "af_heart"; // default english voice
+      if (language === 'hi') voice = "hi_hindi";
+      if (language === 'ta') voice = "ta_tamil";
+      if (language === 'te') voice = "te_telugu";
+      if (language === 'bn') voice = "bn_bengali";
+      if (language === 'es') voice = "es_spanish";
+      if (language === 'fr') voice = "fr_french";
+      
+      console.log(`[Job ${jobId}] Calling Kokoro TTS at endpoint ${endpoint} with voice ${voice}`);
+      
+      const audioResult = await audioApp.predict(endpoint, [
         script,
         voice,
         1.0 // speed
       ]);
       
-      // The result is usually an array containing the audio file object or URL
-      const audioUrl = audioResult.data[1]?.url || audioResult.data[0]?.url;
+      const audioUrl = audioResult.data[1]?.url || audioResult.data[0]?.url || (Array.isArray(audioResult.data) ? audioResult.data.find(d => d?.url)?.url : null);
       if (audioUrl) {
         await downloadFile(audioUrl, audioPath);
       } else {
-        throw new Error("No audio URL returned from Kokoro");
+        throw new Error(`No audio URL returned from Kokoro. Payload: ${JSON.stringify(audioResult.data)}`);
       }
     } catch (err) {
-      console.warn(`[Job ${jobId}] Kokoro API failed, creating dummy audio for testing. Error:`, err.message);
+      console.error(`[Job ${jobId}] Kokoro API failed. Details:`, err.message, err.data || '');
       // Fallback for development if space is paused/inaccessible
       await generateDummyAudio(audioPath, target_length_seconds || 10);
     }
@@ -56,26 +72,47 @@ export async function processVideoJob(jobId, payload) {
     try {
       if (imagePath) {
         // Image to Video
-        const videoApp = await client("Wan-AI/Wan2.2-TI2V-5B");
-        const videoResult = await videoApp.predict("/predict", [
+        const videoApp = await client("Wan-AI/Wan2.2-I2V-14B");
+        let endpoint = "/predict";
+        try {
+          const apiInfo = await videoApp.view_api();
+          const endpoints = Object.keys(apiInfo.named_endpoints || {});
+          if (endpoints.includes("/generate_video")) endpoint = "/generate_video";
+          else if (endpoints.includes("/i2v")) endpoint = "/i2v";
+        } catch (e) {}
+
+        console.log(`[Job ${jobId}] Calling Wan2.2-I2V at endpoint ${endpoint}`);
+        const videoResult = await videoApp.predict(endpoint, [
           handle_file(imagePath), // image
           script, // prompt
-          aspect_ratio // aspect ratio might not be supported in TI2V, but pass if needed
+          "5.0" // optional parameters for typical Gradio i2v space
         ]);
-        const videoUrl = videoResult.data[0]?.url;
-        await downloadFile(videoUrl, videoPath);
+        const videoUrl = videoResult.data[0]?.url || (Array.isArray(videoResult.data) ? videoResult.data.find(d => d?.url)?.url : null);
+        if (videoUrl) await downloadFile(videoUrl, videoPath);
+        else throw new Error(`No video URL returned from Wan2.2-I2V. Payload: ${JSON.stringify(videoResult.data)}`);
       } else {
-        // Text to Video - using a community space if official is paused
-        const videoApp = await client("r3gm/wan2-2-fp8da-aoti-preview");
-        const videoResult = await videoApp.predict("/predict", [
+        // Text to Video
+        const videoApp = await client("Wan-AI/Wan2.2-T2V-14B");
+        let endpoint = "/predict";
+        try {
+          const apiInfo = await videoApp.view_api();
+          const endpoints = Object.keys(apiInfo.named_endpoints || {});
+          if (endpoints.includes("/generate_video")) endpoint = "/generate_video";
+          else if (endpoints.includes("/t2v")) endpoint = "/t2v";
+        } catch (e) {}
+
+        console.log(`[Job ${jobId}] Calling Wan2.2-T2V at endpoint ${endpoint}`);
+        const videoResult = await videoApp.predict(endpoint, [
           script, // prompt
           aspect_ratio, // aspect ratio
+          "5.0" // optional speed/duration
         ]);
-        const videoUrl = videoResult.data[0]?.url;
-        await downloadFile(videoUrl, videoPath);
+        const videoUrl = videoResult.data[0]?.url || (Array.isArray(videoResult.data) ? videoResult.data.find(d => d?.url)?.url : null);
+        if (videoUrl) await downloadFile(videoUrl, videoPath);
+        else throw new Error(`No video URL returned from Wan2.2-T2V. Payload: ${JSON.stringify(videoResult.data)}`);
       }
     } catch (err) {
-      console.warn(`[Job ${jobId}] Wan2.2 API failed, creating dummy video for testing. Error:`, err.message);
+      console.error(`[Job ${jobId}] Wan2.2 API failed. Details:`, err.message, err.data || '');
       // Fallback for development if space is paused/inaccessible
       await generateDummyVideo(videoPath, aspect_ratio);
     }
